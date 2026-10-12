@@ -4,6 +4,7 @@
 # Swift build output
 app/.build/
 app/build/
+app/build.noindex/
 
 # Python
 __pycache__/
