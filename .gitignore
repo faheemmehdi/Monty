@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Swift build output
+app/.build/
+app/build/
+
+# Python
+__pycache__/
+
+# Personal data from the benchmark: voice recordings, results, and a personal dictionary
+bench/samples/
+bench/results/
+bench/models/
+bench/vocab.txt
+
+# Monty's own data folder, if it is ever created inside a checkout
+/Dictionary.txt
+/History.json
+/Logs/
+/Meeting Notes/

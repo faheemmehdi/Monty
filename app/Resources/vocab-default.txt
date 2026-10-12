@@ -1,0 +1,11 @@
+# Monty custom dictionary, one entry per line. Lines starting with # are ignored.
+#
+#   Word                     -> the model is told this word may appear
+#   Word = wrong1, wrong2    -> also, any of the wrong spellings is replaced with Word
+#
+# Examples (remove the # to use them):
+#   Jane Doe = Jain Doe, Jane Dough
+#   GitHub = Git Hub
+#
+# Changes are picked up on the next dictation, no restart needed. You can also edit
+# this list in the Monty window, under Dictionary.
