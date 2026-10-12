@@ -9,6 +9,10 @@
   Offline voice dictation and meeting notes in 20+ languages, powered by Gemma 4.
 </p>
 
+<p align="center">
+  <img src="docs/demo.gif" width="720" alt="Hold fn and speak: Monty listens in the notch, writes the text where the cursor is, and shows the last dictation when you rest the mouse on the notch.">
+</p>
+
 ---
 
 > **Work in progress.** Monty is used every day, but there is no ready-made download yet:

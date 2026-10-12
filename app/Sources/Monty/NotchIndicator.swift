@@ -668,3 +668,111 @@ private struct MeetingPrompt: View {
         .padding(.bottom, 12)
     }
 }
+
+// MARK: Demo for the README
+
+/// Draws a made-up demo of a dictation, frame by frame, for the GIF in the README:
+/// the notch, Monty listening, nibbling, celebrating, the text appearing, and the hover
+/// panel. Nothing from the real screen is captured.
+enum NotchDemo {
+    static let fps = 12.0
+    static let duration = 10.0
+    private static let sentence = "I can't make it to the office tomorrow, please move the meeting to Friday."
+
+    static func renderFrames(to folder: URL) throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let model = IndicatorModel()
+        var geometry = NotchGeometry()
+        geometry.notchWidth = 179
+        geometry.height = 32
+        model.geometry = geometry
+        model.mode = .english
+        model.slots = [.english, .romanUrdu]
+        model.responseSeconds = 1.4
+
+        let frames = Int(duration * fps)
+        for frame in 0..<frames {
+            let t = Double(frame) / fps
+            let (phase, phaseTime, typed, caption) = scene(at: t)
+            model.phase = phase
+            model.hovering = phase == .hidden && t >= 7.0 && t < 9.2
+            model.lastText = sentence
+            model.phaseStart = Date().addingTimeInterval(-phaseTime)
+            model.levels = (0..<IndicatorModel.barCount).map { i in
+                CGFloat(0.35 + 0.55 * abs(sin(t * 7 + Double(i) * 0.8)))
+            }
+            let view = DemoScene(model: model, typed: typed, caption: caption)
+            guard let image = MontyIcons.render(view, scale: 2),
+                  let tiff = image.tiffRepresentation,
+                  let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+            else { continue }
+            try png.write(to: folder.appendingPathComponent(String(format: "frame%03d.png", frame)))
+        }
+    }
+
+    /// What is on screen at second `t`: the island's phase, how long it has been in it,
+    /// how much of the sentence is typed, and the caption.
+    private static func scene(at t: Double) -> (NotchIndicator.Phase, Double, String, String) {
+        switch t {
+        case ..<0.6: return (.hidden, 0, "", "Hold fn and speak")
+        case ..<3.2: return (.recording(.english), t - 0.6, "", "Hold fn and speak")
+        case ..<4.6: return (.processing, t - 3.2, "", "Let go: Monty writes it")
+        case ..<6.4:
+            let shown = Int(Double(sentence.count) * min(1, (t - 4.6) / 0.6))
+            return (.done, t - 4.6, String(sentence.prefix(shown)), "Typed where your cursor is")
+        case ..<7.0: return (.hidden, 0, sentence, "Typed where your cursor is")
+        case ..<9.2: return (.hidden, 0, sentence, "Rest the mouse on the notch")
+        default: return (.hidden, 0, sentence, "Hold fn and speak")
+        }
+    }
+}
+
+private struct DemoScene: View {
+    @ObservedObject var model: IndicatorModel
+    let typed: String
+    let caption: String
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            LinearGradient(colors: [Color(red: 0.78, green: 0.71, blue: 1), Color(red: 0.5, green: 0.42, blue: 1)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            // The notch itself, under the island.
+            UnevenRoundedRectangle(bottomLeadingRadius: 10, bottomTrailingRadius: 10, style: .continuous)
+                .fill(Color.black)
+                .frame(width: model.geometry.notchWidth, height: model.geometry.height)
+            IslandView(model: model)
+                .frame(width: model.geometry.panelSize.width, height: model.geometry.panelSize.height)
+            VStack(spacing: 18) {
+                Spacer().frame(height: 210)
+                // A message being written in some app.
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 6) {
+                        ForEach([Color.red, .yellow, .green], id: \.self) { c in Circle().fill(c.opacity(0.8)).frame(width: 10, height: 10) }
+                        Spacer()
+                        Text("New Message").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.black.opacity(0.45))
+                        Spacer()
+                    }
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(white: 0.96))
+                        .frame(height: 74)
+                        .overlay(alignment: .topLeading) {
+                            Text(typed.isEmpty ? " " : typed + (typed.count < 74 ? "|" : ""))
+                                .font(.system(size: 15))
+                                .foregroundStyle(Color.black.opacity(0.85))
+                                .padding(12)
+                        }
+                }
+                .padding(16)
+                .frame(width: 560)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(.white))
+                .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+                Text(caption)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                Spacer()
+            }
+        }
+        .frame(width: 800, height: 470)
+        .environment(\.colorScheme, .dark)
+    }
+}

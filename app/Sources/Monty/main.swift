@@ -328,6 +328,14 @@ if args.count == 2, args[1] == "--detector-test" {
     exit(0)
 }
 
+// Developer: renders the README demo frames (no screen capture).
+//   Monty --render-demo <folder>
+if args.count == 3, args[1] == "--render-demo" {
+    MainActor.assumeIsolated { try! NotchDemo.renderFrames(to: URL(fileURLWithPath: args[2])) }
+    print("rendered \(Int(NotchDemo.duration * NotchDemo.fps)) frames")
+    exit(0)
+}
+
 // One Monty at a time: a second copy would add a second menu bar icon and a second
 // keyboard listener, and both would type every dictation.
 if let id = Bundle.main.bundleIdentifier,
