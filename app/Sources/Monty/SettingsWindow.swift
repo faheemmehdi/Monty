@@ -6,16 +6,13 @@ import SwiftUI
 /// panel and this window always agree.
 final class SettingsModel: ObservableObject {
     enum Section: String, CaseIterable, Identifiable {
-        case home = "Home", notes = "Notes", languages = "Languages", microphone = "Microphone", model = "Model"
-        case dictionary = "Dictionary", about = "About"
+        case home = "Home", notes = "Notes", dictionary = "Dictionary", settings = "Settings", about = "About"
         var id: String { rawValue }
         var icon: String {
             switch self {
             case .home: return "house.fill"
             case .notes: return "note.text"
-            case .languages: return "globe"
-            case .microphone: return "mic.fill"
-            case .model: return "cpu.fill"
+            case .settings: return "gearshape.fill"
             case .dictionary: return "character.book.closed.fill"
             case .about: return "info.circle.fill"
             }
@@ -233,27 +230,12 @@ private struct SidePanel: View {
                 StatTile(icon: "bolt", label: "Avg speed",
                          value: model.stats.averageSeconds.map { String(format: "%.1fs", $0) } ?? "–")
             }
-            HStack {
-                Text("Recent").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                Spacer()
-                Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold)).foregroundStyle(.white.opacity(0.4))
-            }
-            .padding(.top, 6)
-            ScrollView {
-                VStack(spacing: 8) {
-                    if model.history.isEmpty {
-                        Text("Hold fn and say something. Your dictations show up here.")
-                            .font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(14)
-                            .background(RoundedRectangle(cornerRadius: 18).fill(Palette.tile))
-                    }
-                    ForEach(Array(model.history.prefix(12).enumerated()), id: \.element.id) { index, record in
-                        RecentCard(record: record, highlighted: index == 0)
-                    }
-                }
-            }
-            .scrollIndicators(.never)
+            Text("Shortcuts").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                .padding(.top, 6)
+            ShortcutTile(keys: "Hold fn", what: "Talk while held, let go to type")
+            ShortcutTile(keys: "Tap fn twice", what: "Hands-free: fn again to finish, Esc to cancel")
+            ShortcutTile(keys: "fn + ⇧", what: "Switch between language A and B")
+            Spacer(minLength: 0)
         }
         .padding(.top, 46).padding(.horizontal, 12).padding(.bottom, 12)
         .frame(width: 300)
@@ -294,6 +276,21 @@ private struct SidePanel: View {
     }
 }
 
+private struct ShortcutTile: View {
+    let keys: String
+    let what: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            KeyCap(keys: keys)
+            Text(what).font(.system(size: 12)).foregroundStyle(.white.opacity(0.7))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Palette.tile))
+    }
+}
+
 private struct StatTile: View {
     let icon: String
     let label: String
@@ -319,42 +316,6 @@ private struct StatTile: View {
     }
 }
 
-private struct RecentCard: View {
-    let record: DictationRecord
-    let highlighted: Bool
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(record.text)
-                .font(.system(size: 12))
-                .foregroundStyle(highlighted ? Palette.ink : .white.opacity(0.85))
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 6) {
-                Text(record.language)
-                    .font(.system(size: 10, weight: .bold))
-                    .padding(.horizontal, 7).padding(.vertical, 2)
-                    .background(Capsule().fill(highlighted ? Palette.ink.opacity(0.12) : Palette.pink.opacity(0.25)))
-                    .foregroundStyle(highlighted ? Palette.ink : Palette.pink)
-                Text(record.date, style: .relative)
-                    .font(.system(size: 10))
-                    .foregroundStyle(highlighted ? Palette.ink.opacity(0.6) : .white.opacity(0.4))
-                Spacer()
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(record.text, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc").font(.system(size: 11))
-                        .foregroundStyle(highlighted ? Palette.ink : .white.opacity(0.6))
-                }
-                .buttonStyle(.plain)
-                .help("Copy")
-            }
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(highlighted ? Palette.peach : Palette.tile))
-    }
-}
-
 // MARK: Main area
 
 /// The light right side, where each section is a set of bento cards.
@@ -367,9 +328,7 @@ private struct MainArea: View {
                 switch model.section {
                 case .home: HomePage(model: model)
                 case .notes: NotesPage(model: model)
-                case .languages: LanguagesPage(model: model)
-                case .microphone: MicrophonePage(model: model)
-                case .model: ModelPage(model: model)
+                case .settings: SettingsPage(model: model)
                 case .dictionary: DictionaryPage(model: model)
                 case .about: AboutPage()
                 }
@@ -470,37 +429,95 @@ private struct HomePage: View {
     @ObservedObject var model: SettingsModel
     var body: some View {
         PageTitle(title: "Hey there 👋", subtitle: "Hold fn anywhere, talk in your language, and Monty types it for you.")
-        HStack(alignment: .top, spacing: 16) {
-            Bento(title: "Typing in", fill: Palette.peach) {
-                let active = model.activeSlot == 0 ? model.languageA : model.languageB
-                Text(active.label).font(.system(size: 30, weight: .light)).foregroundStyle(Palette.ink)
+        Bento(title: "Typing in", fill: Palette.peach) {
+            let active = model.activeSlot == 0 ? model.languageA : model.languageB
+            Text(active.label).font(.system(size: 30, weight: .light)).foregroundStyle(Palette.ink)
+            HStack(spacing: 8) {
+                Chip(text: "A · \(model.languageA.shortLabel)", fill: model.activeSlot == 0 ? Palette.ink : .white.opacity(0.6),
+                     foreground: model.activeSlot == 0 ? .white : Palette.ink)
+                Chip(text: "B · \(model.languageB.shortLabel)", fill: model.activeSlot == 1 ? Palette.ink : .white.opacity(0.6),
+                     foreground: model.activeSlot == 1 ? .white : Palette.ink)
+                Spacer()
+                Button("Switch") { model.activeSlot = 1 - model.activeSlot }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Capsule().fill(.white))
+                    .foregroundStyle(Palette.ink)
+            }
+        }
+        HStack {
+            Text("Recent").font(.system(size: 20, weight: .regular)).foregroundStyle(Palette.ink)
+            Spacer()
+            Text("\(model.history.count) saved").font(.system(size: 12)).foregroundStyle(Palette.ink.opacity(0.5))
+        }
+        .padding(.top, 4)
+        if model.history.isEmpty {
+            Bento {
+                Text("Hold fn and say something. Your dictations show up here.")
+                    .font(.system(size: 13)).foregroundStyle(Palette.ink.opacity(0.6))
+            }
+        }
+        ForEach(Array(model.history.enumerated()), id: \.element.id) { index, record in
+            RecentRow(record: record, highlighted: index == 0)
+        }
+    }
+}
+
+/// A dictation in the Home list: the text, its language, when, and a copy button.
+private struct RecentRow: View {
+    let record: DictationRecord
+    let highlighted: Bool
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text(record.language)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 40, height: 40)
+                .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(highlighted ? .white : Palette.peach))
+                .foregroundStyle(Palette.ink)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(record.text)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 8) {
-                    Chip(text: "A · \(model.languageA.shortLabel)", fill: model.activeSlot == 0 ? Palette.ink : .white.opacity(0.6),
-                         foreground: model.activeSlot == 0 ? .white : Palette.ink)
-                    Chip(text: "B · \(model.languageB.shortLabel)", fill: model.activeSlot == 1 ? Palette.ink : .white.opacity(0.6),
-                         foreground: model.activeSlot == 1 ? .white : Palette.ink)
-                    Spacer()
-                    Button("Switch") { model.activeSlot = 1 - model.activeSlot }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Capsule().fill(.white))
-                        .foregroundStyle(Palette.ink)
+                    Text(record.date, style: .relative).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.5))
+                    Text(String(format: "· %.1fs", record.seconds)).font(.system(size: 11)).foregroundStyle(Palette.ink.opacity(0.5))
                 }
             }
-            Bento(title: "Gemma", fill: Palette.pink) {
-                Text(model.memory.label).font(.system(size: 30, weight: .light)).foregroundStyle(Palette.ink)
-                Text("stays in memory after a dictation").font(.system(size: 12)).foregroundStyle(Palette.ink.opacity(0.65))
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(record.text, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc").font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(highlighted ? .white : Palette.cream))
+                    .foregroundStyle(Palette.ink)
             }
-            .frame(width: 230)
+            .buttonStyle(.plain)
+            .help("Copy")
         }
-        Bento(title: "Shortcuts", fill: Palette.ink, dark: true) {
-            shortcut("Hold fn", "Talk while held, let go to type")
-            shortcut("Tap fn twice", "Hands-free: fn again to finish, Esc to cancel")
-            shortcut("fn + ⇧", "Switch between language A and B")
-        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(highlighted ? Palette.peach : .white))
+    }
+}
+
+/// Languages, microphone, model and startup, on one page.
+private struct SettingsPage: View {
+    @ObservedObject var model: SettingsModel
+    var body: some View {
+        PageTitle(title: "Settings", subtitle: "Languages, microphone, model and startup.")
+        SectionHeader(title: "Languages", icon: "globe")
+        LanguagesPage(model: model)
+        SectionHeader(title: "Microphone", icon: "mic.fill")
+        MicrophonePage(model: model)
+        SectionHeader(title: "Model", icon: "cpu.fill")
+        ModelPage(model: model)
+        SectionHeader(title: "Startup", icon: "power")
         HStack(alignment: .top, spacing: 16) {
-            Bento(title: "Startup") {
+            Bento(title: "Open at login") {
                 Toggle("Open Monty when you log in", isOn: $model.openAtLogin).toggleStyle(.switch).tint(Palette.coral)
             }
             Bento(title: "Your Monty folder") {
@@ -519,19 +536,25 @@ private struct HomePage: View {
             }
         }
     }
+}
 
-    private func shortcut(_ keys: String, _ what: String) -> some View {
-        HStack(spacing: 14) {
-            KeyCap(keys: keys).frame(width: 120, alignment: .leading)
-            Text(what).font(.system(size: 13)).foregroundStyle(.white.opacity(0.75))
+private struct SectionHeader: View {
+    let title: String
+    let icon: String
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).font(.system(size: 13, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Palette.ink)).foregroundStyle(.white)
+            Text(title).font(.system(size: 22, weight: .regular)).foregroundStyle(Palette.ink)
         }
+        .padding(.top, 14)
     }
 }
 
 private struct LanguagesPage: View {
     @ObservedObject var model: SettingsModel
     var body: some View {
-        PageTitle(title: "Languages", subtitle: "Speak in any language. Monty types in the one you pick. fn + ⇧ switches between A and B.")
         HStack(spacing: 16) {
             slot(0, "A", model.languageA) { model.languageA = $0 }
             slot(1, "B", model.languageB) { model.languageB = $0 }
@@ -578,7 +601,6 @@ private struct LanguagesPage: View {
 private struct MicrophonePage: View {
     @ObservedObject var model: SettingsModel
     var body: some View {
-        PageTitle(title: "Microphone", subtitle: "Pick which microphone Monty listens to.")
         Bento(title: "Input") {
             ForEach(model.mics) { mic in
                 let selected = model.micID == mic.id
@@ -612,7 +634,6 @@ private struct MicrophonePage: View {
 private struct ModelPage: View {
     @ObservedObject var model: SettingsModel
     var body: some View {
-        PageTitle(title: "Model", subtitle: "Gemma 4 (e2b) runs on this Mac through Ollama. Nothing goes to the internet.")
         Bento(title: "Keep Gemma in memory") {
             HStack(spacing: 10) {
                 ForEach(ModelMemory.allCases, id: \.self) { m in
