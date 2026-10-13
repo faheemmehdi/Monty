@@ -76,14 +76,15 @@ struct OutputLanguage: Hashable, Identifiable {
     static let romanUrdu = OutputLanguage(
         id: "roman", label: "Roman Urdu", shortLabel: "UR", tested: true,
         style: .custom(
-            "Rewrite it in Roman Urdu: Urdu written with the English alphabet, the way people in "
+            // Worded like the other translated languages. The older wording ("give only that one
+            // version; never add a second version", "an English sentence must never come back
+            // unchanged") made the model write the text twice in about half of all tests.
+            "The output must ALWAYS be in Urdu, written in English letters (Roman Urdu). If it was "
+            + "spoken in another language, such as English, translate the meaning into Urdu, not word "
+            + "by word. Roman Urdu is Urdu written with the English alphabet, the way people in "
             + "Pakistan type casually on WhatsApp, with the usual phonetic spellings. Never use Urdu "
-            + "script or Hindi script. The output must ALWAYS be Roman Urdu, even when the input is "
-            + "entirely in English or another language: then translate every sentence into Urdu and "
-            + "write that Urdu in English letters. An English sentence must never come back unchanged: "
-            + "'How are you? Can you hear me?' becomes the Urdu for that, written in English letters. "
-            + "Give only that one version; never repeat the original or add a second version. "
-            + "Common English words people normally use (meeting, laptop, office, file) stay in English."))
+            + "script or Hindi script. Common English words people normally use (meeting, laptop, "
+            + "office, file) stay in English."))
 
     static let urdu = OutputLanguage(
         id: "urdu", label: "Urdu (اردو)", shortLabel: "اردو", tested: true,
@@ -95,14 +96,13 @@ struct OutputLanguage: Hashable, Identifiable {
     static let hinglish = OutputLanguage(
         id: "hinglish", label: "Hinglish (Roman Hindi)", shortLabel: "HG", tested: true,
         style: .custom(
-            "Rewrite it in Hinglish: Hindi written with the English alphabet, the way people in "
-            + "India type casually on WhatsApp, with the usual phonetic spellings. Never use Devanagari "
-            + "or Urdu script. The output must ALWAYS be Hindi in English letters, even when the input "
-            + "is entirely in English or another language: then translate every sentence into Hindi and "
-            + "write that Hindi in English letters. An English sentence must never come back unchanged: "
-            + "'How are you? Can you hear me?' becomes the Hindi for that, written in English letters. "
-            + "Give only that one version; never repeat the original or add a second version. "
-            + "Common English words people normally use (meeting, laptop, office, file) stay in English."))
+            // Worded like Roman Urdu above, for the same reason.
+            "The output must ALWAYS be in Hindi, written in English letters (Hinglish). If it was "
+            + "spoken in another language, such as English, translate the meaning into Hindi, not "
+            + "word by word. Hinglish is Hindi written with the English alphabet, the way people in "
+            + "India type casually on WhatsApp, with the usual phonetic spellings. Never use "
+            + "Devanagari or Urdu script. Common English words people normally use (meeting, laptop, "
+            + "office, file) stay in English."))
 
     private static func plain(_ id: String, _ label: String, _ short: String, tested: Bool, model: String? = nil) -> OutputLanguage {
         OutputLanguage(id: id, label: label, shortLabel: short, tested: tested, style: .translate(model ?? label))

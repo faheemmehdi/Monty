@@ -87,7 +87,16 @@ struct Ollama {
         let vocab = vocab ?? Vocabulary.load()
         let hint = Vocabulary.hint(Vocabulary.relevant(vocab, to: transcript))
         let text = try await chat(system: Self.rewritePrompt(language) + hint, user: transcript, audio: nil)
-        return NumberWords.digits(in: Vocabulary.applyReplacements(text, vocab))
+        return Self.capitalizingFirstWord(NumberWords.digits(in: Vocabulary.applyReplacements(text, vocab)))
+    }
+
+    /// Roman Urdu and Hinglish often come back starting with a small letter. A first word
+    /// without any capital is capitalized; one like "iPhone" is left as it is.
+    static func capitalizingFirstWord(_ text: String) -> String {
+        guard let first = text.first, first.isLowercase,
+              !text.prefix(while: { !$0.isWhitespace }).contains(where: \.isUppercase)
+        else { return text }
+        return first.uppercased() + text.dropFirst()
     }
 
     /// Applies a changed `memory` setting now, if the model is loaded. When it is not

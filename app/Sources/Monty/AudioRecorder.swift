@@ -31,9 +31,11 @@ final class AudioRecorder {
         }
     }
 
-    private var engine: AVAudioEngine?
+    private var unit: AudioUnit?
+    private var deviceID = AudioDeviceID(kAudioObjectUnknown)
+    private var renderBuffer: AVAudioPCMBuffer?
     private var converter: AVAudioConverter?
-    private var configObserver: NSObjectProtocol?
+    private var deviceListener: AudioObjectPropertyListenerBlock?
     private let lock = NSLock()
     // Guarded by `lock`:
     private var samples: [Int16] = []
@@ -51,7 +53,7 @@ final class AudioRecorder {
             capturing = true
             waitingForFirstAudio = true
         }
-        if engine == nil {
+        if unit == nil {
             do {
                 try startEngine()
             } catch {
@@ -99,46 +101,146 @@ final class AudioRecorder {
 
     // MARK: Engine
 
-    private func startEngine() throws {
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        if let uid = deviceUID {
-            if var id = AudioDevices.device(uid: uid)?.id, let unit = input.audioUnit {
-                AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                     &id, UInt32(MemoryLayout<AudioDeviceID>.size))
-            } else {
-                Log.write("chosen microphone is not connected, using the system default")
-            }
-        }
-        let format = input.outputFormat(forBus: 0)
-        converter = AVAudioConverter(from: format, to: target)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            self?.append(buffer)
-        }
-        engine.prepare()
-        try engine.start()
-        self.engine = engine
+    // The microphone runs on a bare HAL audio unit pointed straight at the chosen device.
+    // AVAudioEngine first opens the system default input, even when another microphone is
+    // chosen, and with some USB headsets its format query spins forever on the main
+    // thread: Monty froze on the next fn press until it was restarted.
 
-        // Unplugging a headset or changing the input stops the engine; start it again.
-        // Starting the engine itself also posts this notice while it keeps running, so
-        // only restart when the engine really stopped. Restarting on every notice loops
-        // forever and records nothing.
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self, weak engine] _ in
-            guard let self, let engine, engine === self.engine, !engine.isRunning else { return }
-            guard self.keepWarm || self.lock.withLock({ self.capturing }) else { return }
-            Log.write("microphone stopped after an audio configuration change, restarting it")
-            self.restartWarmEngine()
+    private struct Failure: LocalizedError {
+        let errorDescription: String?
+    }
+
+    private func check(_ status: OSStatus, _ step: String) throws {
+        guard status == noErr else {
+            throw Failure(errorDescription: "Could not \(step) (error \(status)).")
         }
     }
 
+    private func startEngine() throws {
+        var description = AudioComponentDescription(
+            componentType: kAudioUnitType_Output, componentSubType: kAudioUnitSubType_HALOutput,
+            componentManufacturer: kAudioUnitManufacturer_Apple, componentFlags: 0, componentFlagsMask: 0)
+        guard let component = AudioComponentFindNext(nil, &description) else {
+            throw Failure(errorDescription: "Could not find the microphone audio unit.")
+        }
+        var created: AudioUnit?
+        try check(AudioComponentInstanceNew(component, &created), "open the microphone")
+        guard let unit = created else { throw Failure(errorDescription: "Could not open the microphone.") }
+        do {
+            try configure(unit)
+        } catch {
+            AudioComponentInstanceDispose(unit)
+            throw error
+        }
+        self.unit = unit
+        watchDevices()
+    }
+
+    private func configure(_ unit: AudioUnit) throws {
+        let uint32Size = UInt32(MemoryLayout<UInt32>.size)
+        // Bus 1 is the input side of a HAL unit; bus 0 (playback) stays off.
+        var on: UInt32 = 1, off: UInt32 = 0
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &on, uint32Size), "turn on recording")
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &off, uint32Size), "turn off playback")
+
+        var device = inputDevice()
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                       &device, UInt32(MemoryLayout<AudioDeviceID>.size)), "select the microphone")
+        deviceID = device
+
+        // The microphone's own format, then the same rate and channels as float samples
+        // for the converter, which mixes down to mono and resamples to 16 kHz.
+        var hardware = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &hardware, &size), "read the microphone format")
+        guard hardware.mSampleRate > 0, hardware.mChannelsPerFrame > 0,
+              let format = AVAudioFormat(standardFormatWithSampleRate: hardware.mSampleRate, channels: hardware.mChannelsPerFrame),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192)
+        else { throw Failure(errorDescription: "The microphone reported no usable format.") }
+        var client = format.streamDescription.pointee
+        try check(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &client, size), "set the recording format")
+        var maxFrames = buffer.frameCapacity
+        AudioUnitSetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, uint32Size)
+        renderBuffer = buffer
+        converter = AVAudioConverter(from: format, to: target)
+
+        var callback = AURenderCallbackStruct(inputProc: { refCon, flags, time, bus, frames, _ in
+            Unmanaged<AudioRecorder>.fromOpaque(refCon).takeUnretainedValue().render(flags, time, bus, frames)
+        }, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
+                                       &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size)), "connect the microphone")
+        try check(AudioUnitInitialize(unit), "prepare the microphone")
+        try check(AudioOutputUnitStart(unit), "start the microphone")
+    }
+
+    /// The chosen microphone when it is connected, otherwise the system default input.
+    private func inputDevice() -> AudioDeviceID {
+        if let uid = deviceUID {
+            if let id = AudioDevices.device(uid: uid)?.id { return id }
+            Log.write("chosen microphone is not connected, using the system default")
+        }
+        var id = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id)
+        return id
+    }
+
+    /// Called on the audio thread for every slice of microphone audio.
+    private func render(_ flags: UnsafeMutablePointer<AudioUnitRenderActionFlags>, _ time: UnsafePointer<AudioTimeStamp>,
+                        _ bus: UInt32, _ frames: UInt32) -> OSStatus {
+        guard let unit, let buffer = renderBuffer, frames <= buffer.frameCapacity else { return noErr }
+        buffer.frameLength = frames
+        let status = AudioUnitRender(unit, flags, time, bus, frames, buffer.mutableAudioBufferList)
+        if status == noErr { append(buffer) }
+        return status
+    }
+
+    // Unplugging a headset, or changing the system input while it is the one in use,
+    // leaves the unit with nothing to record: start it again on whatever is there now.
+    private func watchDevices() {
+        let restart: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self, self.unit != nil else { return }
+            guard self.keepWarm || self.lock.withLock({ self.capturing }) else { return }
+            if self.inputDevice() == self.deviceID, self.deviceIsAlive() { return }
+            Log.write("microphone changed or disconnected, restarting it")
+            self.restartWarmEngine()
+        }
+        var defaultInput = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                      mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var devices = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultInput, .main, restart)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &devices, .main, restart)
+        deviceListener = restart
+    }
+
+    private func deviceIsAlive() -> Bool {
+        var alive: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsAlive,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        return AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &alive) == noErr && alive != 0
+    }
+
     private func stopEngine() {
-        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
-        configObserver = nil
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
+        if let deviceListener {
+            var defaultInput = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                          mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var devices = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                     mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultInput, .main, deviceListener)
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &devices, .main, deviceListener)
+        }
+        deviceListener = nil
+        if let unit {
+            AudioOutputUnitStop(unit)
+            AudioUnitUninitialize(unit)
+            AudioComponentInstanceDispose(unit)
+        }
+        unit = nil
+        renderBuffer = nil
     }
 
     private func restartWarmEngine() {
