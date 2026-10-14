@@ -559,16 +559,6 @@ private struct LanguagesPage: View {
             slot(0, "A", model.languageA) { model.languageA = $0 }
             slot(1, "B", model.languageB) { model.languageB = $0 }
         }
-        Bento(title: "Good to know") {
-            Text("\"As Spoken\" types your words in the language you said them, without translating. Roman Urdu and Hinglish write Urdu or Hindi in English letters, the way people text.")
-                .font(.system(size: 13)).foregroundStyle(Palette.ink.opacity(0.7))
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                Chip(text: "\(OutputLanguage.all.count - 1) languages", fill: Palette.peach, foreground: Palette.ink)
-                Chip(text: "All tested", fill: Palette.mint.opacity(0.35), foreground: Palette.ink)
-                Chip(text: "100% offline", fill: Palette.pink.opacity(0.4), foreground: Palette.ink)
-            }
-        }
     }
 
     private func slot(_ index: Int, _ letter: String, _ language: OutputLanguage, set: @escaping (OutputLanguage) -> Void) -> some View {

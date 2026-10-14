@@ -19,6 +19,11 @@ enum History {
         var totalDictations = 0
         var totalWords = 0
         var totalSeconds = 0.0
+        // Optional, so a History.json written before these existed still opens.
+        /// Dictations on `countedDay`. "Today" used to be counted in `records`, which keeps
+        /// only the latest 50, so it stopped at 50.
+        var countedDay: Date?
+        var dayCount: Int?
     }
 
     private static let lock = NSLock()
@@ -53,7 +58,17 @@ enum History {
     static func add(text: String, language: String, seconds: Double) {
         lock.withLock {
             var file = read()
-            file.records = Array(([DictationRecord(text: text, language: language, seconds: seconds, date: Date())] + file.records).prefix(keep))
+            let now = Date()
+            if let day = file.countedDay, Calendar.current.isDate(day, inSameDayAs: now) {
+                file.dayCount = (file.dayCount ?? 0) + 1
+            } else if file.countedDay == nil {
+                // First run with the day counter: start from what the kept records show.
+                file.dayCount = file.records.filter { Calendar.current.isDate($0.date, inSameDayAs: now) }.count + 1
+            } else {
+                file.dayCount = 1
+            }
+            file.countedDay = now
+            file.records = Array(([DictationRecord(text: text, language: language, seconds: seconds, date: now)] + file.records).prefix(keep))
             file.totalDictations += 1
             file.totalWords += text.split(whereSeparator: \.isWhitespace).count
             file.totalSeconds += seconds
@@ -70,9 +85,17 @@ enum History {
 
     static func stats() -> Stats {
         let file = lock.withLock { read() }
-        let today = file.records.filter { Calendar.current.isDateInToday($0.date) }.count
+        let today: Int
+        if let day = file.countedDay, let count = file.dayCount {
+            today = Calendar.current.isDateInToday(day) ? count : 0
+        } else {
+            today = file.records.filter { Calendar.current.isDateInToday($0.date) }.count
+        }
+        // Speed of the recent dictations: the all-time average still carried the slow
+        // first days and hardly moved.
+        let recent = file.records.map(\.seconds)
         return Stats(today: today, total: file.totalDictations, words: file.totalWords,
-                     averageSeconds: file.totalDictations > 0 ? file.totalSeconds / Double(file.totalDictations) : nil)
+                     averageSeconds: recent.isEmpty ? nil : recent.reduce(0, +) / Double(recent.count))
     }
 
     /// Earlier versions kept the history inside the app settings; move it to History.json.
