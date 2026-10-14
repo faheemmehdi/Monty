@@ -79,12 +79,15 @@ struct OutputLanguage: Hashable, Identifiable {
             // Worded like the other translated languages. The older wording ("give only that one
             // version; never add a second version", "an English sentence must never come back
             // unchanged") made the model write the text twice in about half of all tests.
+            // "Entirely" and the last sentence matter: without them, speech that starts with
+            // English words ("I think ...") came back translated into English.
             "The output must ALWAYS be in Urdu, written in English letters (Roman Urdu). If it was "
-            + "spoken in another language, such as English, translate the meaning into Urdu, not word "
-            + "by word. Roman Urdu is Urdu written with the English alphabet, the way people in "
-            + "Pakistan type casually on WhatsApp, with the usual phonetic spellings. Never use Urdu "
+            + "spoken entirely in another language, such as English, translate the meaning into Urdu, "
+            + "not word by word. Roman Urdu is Urdu written with the English alphabet, the way people "
+            + "in Pakistan type casually on WhatsApp, with the usual phonetic spellings. Never use Urdu "
             + "script or Hindi script. Common English words people normally use (meeting, laptop, "
-            + "office, file) stay in English."))
+            + "office, file) stay in English. Speech that mixes Urdu and English is Urdu: keep its "
+            + "English words in English and write the rest in Roman Urdu, never as English."))
 
     static let urdu = OutputLanguage(
         id: "urdu", label: "Urdu (اردو)", shortLabel: "اردو", tested: true,
@@ -98,11 +101,12 @@ struct OutputLanguage: Hashable, Identifiable {
         style: .custom(
             // Worded like Roman Urdu above, for the same reason.
             "The output must ALWAYS be in Hindi, written in English letters (Hinglish). If it was "
-            + "spoken in another language, such as English, translate the meaning into Hindi, not "
-            + "word by word. Hinglish is Hindi written with the English alphabet, the way people in "
-            + "India type casually on WhatsApp, with the usual phonetic spellings. Never use "
+            + "spoken entirely in another language, such as English, translate the meaning into "
+            + "Hindi, not word by word. Hinglish is Hindi written with the English alphabet, the way "
+            + "people in India type casually on WhatsApp, with the usual phonetic spellings. Never use "
             + "Devanagari or Urdu script. Common English words people normally use (meeting, laptop, "
-            + "office, file) stay in English."))
+            + "office, file) stay in English. Speech that mixes Hindi and English is Hindi: keep its "
+            + "English words in English and write the rest in Hinglish, never as English."))
 
     private static func plain(_ id: String, _ label: String, _ short: String, tested: Bool, model: String? = nil) -> OutputLanguage {
         OutputLanguage(id: id, label: label, shortLabel: short, tested: tested, style: .translate(model ?? label))

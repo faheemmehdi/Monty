@@ -67,7 +67,7 @@ struct Ollama {
         // The instructions go in the system message, and the dictionary only into the text
         // step: next to the audio, Gemma treats any text as more speech and copies it into
         // the transcript (a short "hello mic test" came back with every dictionary word).
-        let transcript = try await chat(system: Self.transcribePrompt, user: "Transcribe.", audio: wav)
+        let transcript = try await chat(system: Self.transcribePrompt, user: "Transcribe.", audio: Self.withTrailingSilence(wav))
         guard !transcript.isEmpty, !transcript.localizedCaseInsensitiveContains("[no speech]") else { return "" }
         // A small model sometimes invents a whole conversation from near silence.
         // People speak about 2 to 3 words a second; far more than that was not said.
@@ -79,6 +79,22 @@ struct Ollama {
             Log.write("rejected transcript: \(words) words for \(String(format: "%.1f", seconds))s: \(transcript.prefix(200))")
             throw Failure(errorDescription: "Could not hear clearly, please try again.") }
         return try await rewrite(transcript, to: mode, vocab: vocab)
+    }
+
+    /// Gemma often drops the last word or two when the speech runs close to the end of the
+    /// audio. Half a second of silence after it brought those words back on real dictations
+    /// and changed nothing else.
+    static func withTrailingSilence(_ wav: Data) -> Data {
+        guard wav.count > 44 else { return wav }
+        var padded = wav
+        padded.append(Data(count: Int(AudioRecorder.sampleRate / 2) * 2))
+        // Sizes in the header: the whole file after the first 8 bytes, and the samples.
+        func put(_ value: UInt32, at offset: Int) {
+            withUnsafeBytes(of: value.littleEndian) { padded.replaceSubrange(offset..<offset + 4, with: $0) }
+        }
+        put(UInt32(padded.count - 8), at: 4)
+        put(UInt32(padded.count - 44), at: 40)
+        return padded
     }
 
     /// The second step of a dictation: a transcript rewritten in `language`, with the
@@ -117,7 +133,7 @@ struct Ollama {
     /// Meeting notes: just what was said in one stretch of audio, no rewriting.
     /// Returns "" for silence.
     func transcribe(wav: Data) async throws -> String {
-        let text = try await chat(system: Self.transcribePrompt, user: "Transcribe.", audio: wav)
+        let text = try await chat(system: Self.transcribePrompt, user: "Transcribe.", audio: Self.withTrailingSilence(wav))
         return text.localizedCaseInsensitiveContains("[no speech]") ? "" : text
     }
 
