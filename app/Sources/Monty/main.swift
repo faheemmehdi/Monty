@@ -275,14 +275,16 @@ if args.count == 4, args[1] == "--tap-test" {
 }
 
 // Developer check of meeting notes: records the Mac's sound and the microphone, then
-// prints the transcript and the notes (nothing is saved).
+// prints the transcript and the notes. No note is saved; the recording is, and its path
+// is printed, to check it.
 //   Monty --meeting-test <seconds> <language id>
 if args.count == 4, args[1] == "--meeting-test", let language = OutputLanguage.with(id: args[3]) {
-    let recorder = MeetingRecorder(meeting: .init(name: "Test call", bundlePrefix: ""), language: language, ollama: Ollama())
+    let recorder = MeetingRecorder(meeting: .init(name: "Test call", bundlePrefix: ""), language: language, ollama: Ollama(), saveAudio: true)
     Task { @MainActor in
         do { try recorder.start(micUID: nil) } catch { print("Error: \(error.localizedDescription)"); exit(1) }
         try? await Task.sleep(for: .seconds(Double(args[2]) ?? 40))
         let segments = await recorder.finish()
+        print("== recording: \(recorder.audioURL?.path ?? "none")")
         print("== transcript (others audio: \(recorder.hasOthersAudio))\n" + MeetingRecorder.transcriptText(segments))
         let start = Date()
         let notes = (try? await Ollama().meetingNotes(transcript: MeetingRecorder.transcriptText(segments), language: language, app: "Test call")) ?? "(notes failed)"
@@ -310,6 +312,8 @@ if args.count == 2, args[1] == "--detector-test" {
     let meetB = MeetingDetector.Meeting(name: "Google Meet", bundlePrefix: "com.google.Chrome", key: "xyz-wxyz-xyz")
     var now: MeetingDetector.Meeting?
     detector.finder = { now }
+    var stillOn = false
+    detector.stillOn = { _ in stillOn }
     func polls(_ n: Int, _ meeting: MeetingDetector.Meeting?) { now = meeting; for _ in 0..<n { detector.poll() } }
     func check(_ name: String, _ expected: [String], _ steps: () -> Void) {
         events = []
@@ -322,6 +326,9 @@ if args.count == 2, args[1] == "--detector-test" {
     check("another meeting code: asks for that one", ["end", "start xyz-wxyz-xyz"]) { polls(1, meetB) }
     detector.isRecording = true
     check("while recording, a 15 s gap does not end it", []) { polls(5, nil); polls(1, meetB) }
+    stillOn = true
+    check("while recording, another tab in front or muted for a minute does not end it", []) { polls(20, nil); polls(1, meetB) }
+    stillOn = false
     check("while recording, 21 s without the meeting ends it", ["end"]) { polls(7, nil) }
     detector.isRecording = false
     check("a 3 s blip is not a meeting", []) { polls(1, meetA); polls(2, nil) }

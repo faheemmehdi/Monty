@@ -48,6 +48,9 @@ final class MeetingDetector {
     private var timer: Timer?
     /// What is on right now. Replaceable for the detector self-test.
     lazy var finder: () -> Meeting? = { [unowned self] in self.findMeeting() }
+    /// While notes are taken: whether the meeting is still going on, by a looser test than
+    /// `finder`. Replaceable for the detector self-test.
+    lazy var stillOn: (Meeting) -> Bool = { Self.stillOn($0) }
     private var seenCount = 0
     private var missingCount = 0
     private var candidate: Meeting?
@@ -72,8 +75,11 @@ final class MeetingDetector {
                 return
             }
             // A meeting ends once the app has let go of the microphone for a while
-            // (about 21 seconds while recording, 9 otherwise).
-            if found?.bundlePrefix == current.bundlePrefix {
+            // (about 21 seconds while recording, 9 otherwise). While recording it also
+            // stays on as long as either sign is there on its own: in a browser the window
+            // title is the front tab's, so switching tabs lost it, and muting in Google
+            // Meet lets go of the microphone; either one ended the notes mid-meeting.
+            if found?.bundlePrefix == current.bundlePrefix || (isRecording && stillOn(current)) {
                 missingCount = 0
             } else {
                 missingCount += 1
@@ -114,6 +120,12 @@ final class MeetingDetector {
             }
         }
         return nil
+    }
+
+    /// The meeting app still uses the microphone, or (in a browser) a window still shows it.
+    private static func stillOn(_ meeting: Meeting) -> Bool {
+        if bundlesUsingMicrophone().contains(where: { $0.hasPrefix(meeting.bundlePrefix) }) { return true }
+        return browsers.contains(meeting.bundlePrefix) && webMeeting(inBrowser: meeting.bundlePrefix) != nil
     }
 
     /// The meeting a browser window shows, if any: its name and a key for this meeting.

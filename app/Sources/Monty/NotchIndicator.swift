@@ -235,7 +235,8 @@ final class IndicatorModel: ObservableObject {
     @Published var meetingLevel: CGFloat = 0
     /// A meeting is on but notes were declined; the hover panel still offers them.
     @Published var meetingAvailable = false
-    var onStartNotes: (() -> Void)?
+    /// true: keep the meeting's audio too; false: only the notes; nil: as chosen last time.
+    var onStartNotes: ((Bool?) -> Void)?
     var onDismissMeeting: (() -> Void)?
     var onStopNotes: (() -> Void)?
     var onPickNotesLanguage: (() -> Void)?
@@ -529,7 +530,7 @@ private struct ExpandedPanel: View {
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
             Spacer()
-            Button { model.onStartNotes?() } label: {
+            Button { model.onStartNotes?(nil) } label: {
                 Text("Take notes").font(.system(size: 12, weight: .bold, design: .rounded))
                     .padding(.horizontal, 12).padding(.vertical, 5)
                     .background(Capsule().fill(Color(red: 1, green: 0.478, blue: 0.604)))
@@ -636,7 +637,8 @@ private struct MeetingPrompt: View {
                 Button { model.onPickNotesLanguage?() } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "globe").font(.system(size: 10, weight: .semibold))
-                        Text(model.notesLanguage.label).font(.system(size: 12, weight: .semibold, design: .rounded)).lineLimit(1)
+                        // The short label: with three buttons beside it, the full name gets cut off.
+                        Text(model.notesLanguage.shortLabel).font(.system(size: 12, weight: .semibold, design: .rounded)).lineLimit(1)
                         Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
                     }
                     .padding(.horizontal, 10).padding(.vertical, 6)
@@ -652,15 +654,24 @@ private struct MeetingPrompt: View {
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 .buttonStyle(.plain)
-                Button { model.onStartNotes?() } label: {
-                    Text("Start notes").font(.system(size: 12, weight: .bold, design: .rounded))
-                        .padding(.horizontal, 14).padding(.vertical, 6)
+                Button { model.onStartNotes?(false) } label: {
+                    Text("Text only").font(.system(size: 12, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Capsule().fill(Color.white.opacity(0.9)))
+                        .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .help("Notes and a transcript")
+                Button { model.onStartNotes?(true) } label: {
+                    Text("Text + Audio").font(.system(size: 12, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(Capsule().fill(Color(red: 1, green: 0.478, blue: 0.604)))
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.plain)
+                .help("Notes, a transcript and a recording of the meeting")
             }
-            Text("Let everyone know you are taking notes.")
+            Text("Let everyone know you are taking notes or recording.")
                 .font(.system(size: 10, design: .rounded))
                 .foregroundStyle(.white.opacity(0.45))
         }

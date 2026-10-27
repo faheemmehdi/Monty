@@ -24,6 +24,8 @@ enum History {
         /// only the latest 50, so it stopped at 50.
         var countedDay: Date?
         var dayCount: Int?
+        /// Words dictated on `countedDay`.
+        var dayWords: Int?
     }
 
     private static let lock = NSLock()
@@ -59,18 +61,24 @@ enum History {
         lock.withLock {
             var file = read()
             let now = Date()
+            let words = text.split(whereSeparator: \.isWhitespace).count
+            // What the kept records show for today, where a counter does not exist yet.
+            let keptToday = file.records.filter { Calendar.current.isDate($0.date, inSameDayAs: now) }
+            let keptWords = keptToday.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
             if let day = file.countedDay, Calendar.current.isDate(day, inSameDayAs: now) {
                 file.dayCount = (file.dayCount ?? 0) + 1
+                file.dayWords = (file.dayWords ?? keptWords) + words
             } else if file.countedDay == nil {
-                // First run with the day counter: start from what the kept records show.
-                file.dayCount = file.records.filter { Calendar.current.isDate($0.date, inSameDayAs: now) }.count + 1
+                file.dayCount = keptToday.count + 1
+                file.dayWords = keptWords + words
             } else {
                 file.dayCount = 1
+                file.dayWords = words
             }
             file.countedDay = now
             file.records = Array(([DictationRecord(text: text, language: language, seconds: seconds, date: now)] + file.records).prefix(keep))
             file.totalDictations += 1
-            file.totalWords += text.split(whereSeparator: \.isWhitespace).count
+            file.totalWords += words
             file.totalSeconds += seconds
             write(file)
         }
@@ -78,6 +86,7 @@ enum History {
 
     struct Stats {
         var today = 0
+        var todayWords = 0
         var total = 0
         var words = 0
         var averageSeconds: Double?
@@ -85,16 +94,22 @@ enum History {
 
     static func stats() -> Stats {
         let file = lock.withLock { read() }
+        let kept = file.records.filter { Calendar.current.isDateInToday($0.date) }
+        let keptWords = kept.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
         let today: Int
+        let todayWords: Int
         if let day = file.countedDay, let count = file.dayCount {
-            today = Calendar.current.isDateInToday(day) ? count : 0
+            let isToday = Calendar.current.isDateInToday(day)
+            today = isToday ? count : 0
+            todayWords = isToday ? (file.dayWords ?? keptWords) : 0
         } else {
-            today = file.records.filter { Calendar.current.isDateInToday($0.date) }.count
+            today = kept.count
+            todayWords = keptWords
         }
         // Speed of the recent dictations: the all-time average still carried the slow
         // first days and hardly moved.
         let recent = file.records.map(\.seconds)
-        return Stats(today: today, total: file.totalDictations, words: file.totalWords,
+        return Stats(today: today, todayWords: todayWords, total: file.totalDictations, words: file.totalWords,
                      averageSeconds: recent.isEmpty ? nil : recent.reduce(0, +) / Double(recent.count))
     }
 

@@ -183,7 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         indicator.model.onPickLanguage = { [weak self] slot in self?.pickLanguage(forSlot: slot) }
         indicator.model.onOpenSettings = { [weak self] in self?.openSettings() }
         indicator.model.notesLanguage = notesLanguage
-        indicator.model.onStartNotes = { [weak self] in self?.startNotes() }
+        indicator.model.onStartNotes = { [weak self] audio in self?.startNotes(audio: audio) }
         indicator.model.onDismissMeeting = { [weak self] in self?.dismissMeeting() }
         indicator.model.onStopNotes = { [weak self] in self?.stopNotes() }
         indicator.model.onPickNotesLanguage = { [weak self] in self?.pickNotesLanguage() }
@@ -602,13 +602,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Starts notes from this moment: for the meeting Monty noticed, or, when it noticed
     /// none, for whatever call is going on (every app's sound plus the microphone).
-    private func startNotes() {
+    /// Whether the last meeting notes kept the audio too; used when notes start without
+    /// that question (the hover panel, the menu, the Monty window).
+    private var meetingAudio: Bool {
+        get { UserDefaults.standard.bool(forKey: "meetingAudio") }
+        set { UserDefaults.standard.set(newValue, forKey: "meetingAudio") }
+    }
+
+    private func startNotes(audio: Bool? = nil) {
         guard meetingRecorder == nil else { return }
+        if let audio { meetingAudio = audio }
         let meeting = pendingMeeting ?? MeetingDetector.Meeting(name: "Meeting", bundlePrefix: "", key: "manual")
         pendingMeeting = meeting
         indicator.model.meetingName = meeting.name
         defer { syncMeetingControls() }
-        let recorder = MeetingRecorder(meeting: meeting, language: notesLanguage, ollama: ollama)
+        let recorder = MeetingRecorder(meeting: meeting, language: notesLanguage, ollama: ollama, saveAudio: meetingAudio)
         recorder.onLevel = { [weak self] level in self?.indicator.model.meetingLevel = CGFloat(level) }
         do {
             try recorder.start(micUID: micUID)
@@ -637,6 +645,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task {
             let segments = await recorder.finish()
             guard !segments.isEmpty else {
+                // Nobody spoke: there are no notes, and the recording is only silence.
+                if let audio = recorder.audioURL { try? FileManager.default.removeItem(at: audio) }
                 await MainActor.run {
                     self.indicator.setMeeting(nil)
                     self.indicator.show(.failed)
@@ -651,6 +661,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let url = try NotesStore.save(notes: notes, segments: segments, meeting: recorder.meeting,
                                               language: recorder.language, startedAt: recorder.startedAt, duration: duration,
                                               transcriptHeading: transcriptHeading)
+                NotesStore.attachAudio(recorder.audioURL, to: url)
                 await MainActor.run {
                     self.indicator.model.phaseStart = Date()
                     self.indicator.setMeeting(.saved)
@@ -662,6 +673,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 }
             } catch {
+                NotesStore.keepAudio(recorder.audioURL, meeting: recorder.meeting, startedAt: recorder.startedAt)
                 await MainActor.run {
                     self.indicator.setMeeting(nil)
                     self.indicator.show(.failed)

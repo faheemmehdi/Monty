@@ -187,6 +187,9 @@ struct Ollama {
 
     static let noteHeadings = ["Summary", "Key points", "Decisions", "Action items", "None", "Transcript"]
     private static var headingCache: [String: [String]] = [:]
+    /// For Roman Urdu and Hinglish: a heading in Urdu or Hindi script, as the model may also
+    /// write it inside translated notes, and the same heading in English letters.
+    private static var scriptHeadings: [String: [String: String]] = [:]
 
     /// The note headings in `language`, in the order of `noteHeadings`. The model keeps
     /// headings in English when it translates whole notes, so they are translated on their own.
@@ -206,18 +209,39 @@ struct Ollama {
             let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             if parts.count == 2, !parts[1].isEmpty { found[parts[0].lowercased()] = parts[1] }
         }
-        let headings = Self.noteHeadings.map { found[$0.lowercased()] ?? $0 }
+        var headings = Self.noteHeadings.map { found[$0.lowercased()] ?? $0 }
+        // For Roman Urdu and Hinglish the model writes these translations in Urdu or Hindi
+        // script every time, whatever the prompt says. The dictation rewrite turns script
+        // into English letters reliably, so each one goes through it.
+        if Self.latinOutput.contains(language.id) {
+            var aliases: [String: String] = [:]
+            for (i, heading) in headings.enumerated() where Self.hasUrduOrHindiScript(heading) {
+                if let roman = try? await rewrite(heading, to: language, vocab: []), !roman.isEmpty,
+                   !Self.hasUrduOrHindiScript(roman) {
+                    aliases[heading] = roman
+                    headings[i] = roman
+                } else {
+                    headings[i] = Self.noteHeadings[i]  // English rather than the wrong script
+                }
+            }
+            Self.scriptHeadings[language.id] = aliases
+        }
         Self.headingCache[language.id] = headings
         return headings
     }
 
     private func localizingHeadings(_ notes: String, to language: OutputLanguage) async -> String {
         let local = await headings(in: language)
+        let aliases = Self.scriptHeadings[language.id] ?? [:]
         return notes.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
             let text = line.trimmingCharacters(in: .whitespaces)
             for (english, translated) in zip(Self.noteHeadings, local) {
                 if text.caseInsensitiveCompare("## \(english)") == .orderedSame { return "## \(translated)" }
                 if text.caseInsensitiveCompare("- \(english)") == .orderedSame { return "- \(translated)" }
+            }
+            for (script, roman) in aliases {
+                if text == "## \(script)" { return "## \(roman)" }
+                if text == "- \(script)" { return "- \(roman)" }
             }
             return String(line)
         }.joined(separator: "\n")

@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 
 /// Everything the settings window shows and edits. The app delegate fills it in and is
@@ -226,7 +227,8 @@ private struct SidePanel: View {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                 StatTile(icon: "sun.max", label: "Today", value: "\(model.stats.today)")
                 StatTile(icon: "sparkles", label: "All time", value: "\(model.stats.total)")
-                StatTile(icon: "text.word.spacing", label: "Words", value: compact(model.stats.words))
+                StatTile(icon: "text.word.spacing", label: "Words", value: compact(model.stats.words),
+                         hover: ("Words today", compact(model.stats.todayWords)))
                 StatTile(icon: "bolt", label: "Avg speed",
                          value: model.stats.averageSeconds.map { String(format: "%.1fs", $0) } ?? "–")
             }
@@ -295,7 +297,23 @@ private struct StatTile: View {
     let icon: String
     let label: String
     let value: String
+    /// Label and value shown instead while the pointer is over the tile.
+    var hover: (label: String, value: String)?
+    // An object, not @State: the SwiftUI macros need Xcode, and this builds without it.
+    @StateObject private var pointer = Pointer()
     var body: some View {
+        let showHover = pointer.inside && hover != nil
+        let label = showHover ? hover!.label : self.label
+        let value = showHover ? hover!.value : self.value
+        return tile(label: label, value: value)
+            .onHover { inside in withAnimation(.easeOut(duration: 0.15)) { pointer.inside = inside } }
+    }
+
+    private final class Pointer: ObservableObject {
+        @Published var inside = false
+    }
+
+    private func tile(label: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
@@ -741,7 +759,8 @@ private struct NotesPage: View {
 
     var body: some View {
         if let note = model.selectedNote {
-            NoteDetail(note: note) { withAnimation(.spring(response: 0.3)) { model.selectedNote = nil } }
+            NoteDetail(note: note, back: { withAnimation(.spring(response: 0.3)) { model.selectedNote = nil } },
+                       delete: { delete(note) })
         } else {
             list
         }
@@ -787,6 +806,27 @@ private struct NotesPage: View {
         }
     }
 
+    /// Asks first, then moves the note to the Trash.
+    private func delete(_ note: MeetingNote) {
+        let alert = NSAlert()
+        alert.messageText = "Delete \"\(note.title)\"?"
+        alert.informativeText = "The note and its transcript move to the Trash. You can put them back from there."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try NotesStore.moveToTrash(note)
+        } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        withAnimation(.spring(response: 0.3)) {
+            if model.selectedNote == note { model.selectedNote = nil }
+            model.reloadNotes()
+        }
+    }
+
     private func liveButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title).font(.system(size: 12, weight: .bold))
@@ -819,6 +859,7 @@ private struct NotesPage: View {
                 ForEach(model.notes) { note in
                     Button { withAnimation(.spring(response: 0.3)) { model.selectedNote = note } } label: { NoteRow(note: note) }
                         .buttonStyle(.plain)
+                        .contextMenu { Button("Delete Note…", role: .destructive) { delete(note) } }
                 }
             }
             Button {
@@ -861,9 +902,106 @@ private struct NoteRow: View {
     }
 }
 
+/// Plays a meeting's recording, or a stretch of it, from the note. Recordings are stereo,
+/// You on the left and Others on the right; a line of the transcript plays its own
+/// speaker's channel, the whole recording plays both mixed. Older recordings are mono.
+private final class NotePlayer: ObservableObject {
+    /// What is loaded: "all", or a transcript line's number. Stays set while paused.
+    @Published private(set) var current: String?
+    @Published private(set) var playing = false
+
+    private let engine = AVAudioEngine()
+    private let node = AVAudioPlayerNode()
+    private var file: AVAudioFile?
+    private var channel: Int?
+    private var nextFrame: AVAudioFramePosition = 0
+    private var endFrame: AVAudioFramePosition = 0
+    private var pending = 0
+    private var session = 0
+
+    init() { engine.attach(node) }
+
+    /// Plays `id` from `start` to `end` seconds (to the end when nil); the same `id` again
+    /// pauses or resumes it.
+    func toggle(_ url: URL, id: String, from start: Double = 0, to end: Double? = nil, channel: Int? = nil) {
+        if current == id {
+            if playing { node.pause() } else { node.play() }
+            playing.toggle()
+            return
+        }
+        stop()
+        guard let file = try? AVAudioFile(forReading: url),
+              let mono = AVAudioFormat(standardFormatWithSampleRate: file.processingFormat.sampleRate, channels: 1)
+        else { return }
+        let rate = file.processingFormat.sampleRate
+        self.file = file
+        self.channel = file.processingFormat.channelCount > 1 ? channel : nil
+        nextFrame = min(AVAudioFramePosition(start * rate), file.length)
+        endFrame = min(end.map { AVAudioFramePosition($0 * rate) } ?? file.length, file.length)
+        engine.connect(node, to: engine.mainMixerNode, format: mono)
+        do { try engine.start() } catch { return }
+        current = id
+        session += 1
+        scheduleNext()
+        scheduleNext()
+        node.play()
+        playing = true
+    }
+
+    func stop() {
+        session += 1
+        node.stop()
+        engine.stop()
+        file = nil
+        pending = 0
+        current = nil
+        playing = false
+    }
+
+    /// Reads the next 5 seconds, keeps one channel or mixes both down to mono, and queues it.
+    private func scheduleNext() {
+        guard let file, nextFrame < endFrame else {
+            if pending == 0 { stop() }
+            return
+        }
+        let count = AVAudioFrameCount(min(AVAudioFramePosition(file.processingFormat.sampleRate * 5), endFrame - nextFrame))
+        guard let input = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: count),
+              let mono = AVAudioFormat(standardFormatWithSampleRate: file.processingFormat.sampleRate, channels: 1),
+              let output = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: count)
+        else { stop(); return }
+        file.framePosition = nextFrame
+        guard (try? file.read(into: input, frameCount: count)) != nil, input.frameLength > 0,
+              let source = input.floatChannelData, let target = output.floatChannelData?[0]
+        else { stop(); return }
+        let channels = Int(input.format.channelCount)
+        for i in 0..<Int(input.frameLength) {
+            if let channel {
+                target[i] = source[channel][i]
+            } else {
+                var sum: Float = 0
+                for c in 0..<channels { sum += source[c][i] }
+                target[i] = channels > 1 ? min(max(sum, -1), 1) : sum
+            }
+        }
+        output.frameLength = input.frameLength
+        nextFrame += AVAudioFramePosition(input.frameLength)
+        pending += 1
+        let session = self.session
+        node.scheduleBuffer(output) { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.session == session else { return }
+                self.pending -= 1
+                self.scheduleNext()
+            }
+        }
+    }
+}
+
 private struct NoteDetail: View {
     let note: MeetingNote
     let back: () -> Void
+    let delete: () -> Void
+    @StateObject private var player = NotePlayer()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -875,11 +1013,17 @@ private struct NoteDetail: View {
                 }
                 .buttonStyle(.plain)
                 Spacer()
+                if let audio = note.audio {
+                    let on = player.current == "all" && player.playing
+                    pill(on ? "Pause" : "Play recording", icon: on ? "pause.fill" : "play.fill",
+                         fill: Palette.peach, foreground: Palette.ink) { player.toggle(audio, id: "all") }
+                }
                 pill("Copy", icon: "doc.on.doc") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(note.body, forType: .string)
                 }
                 pill("Show in Finder", icon: "folder") { NSWorkspace.shared.activateFileViewerSelecting([note.id]) }
+                pill("Delete", icon: "trash", fill: Palette.coral, foreground: Palette.ink, action: delete)
             }
             HStack(spacing: 8) {
                 Chip(text: note.app, fill: Palette.pink, foreground: Palette.ink)
@@ -887,28 +1031,76 @@ private struct NoteDetail: View {
                 if note.duration > 0 { Chip(text: "\(max(1, Int(note.duration / 60))) min", fill: .white, foreground: Palette.ink) }
                 if !note.language.isEmpty { Chip(text: note.language, fill: Palette.peach, foreground: Palette.ink) }
             }
-            Bento { MarkdownBody(text: note.body) }
+            Bento {
+                MarkdownBody(text: note.body, playing: player.playing ? player.current : nil,
+                             onPlay: note.audio.map { audio in
+                                 { line in
+                                     player.toggle(audio, id: "\(line.index)", from: line.start, to: line.end,
+                                                   channel: line.speaker == "You" ? 0 : 1)
+                                 }
+                             })
+            }
         }
+        .onDisappear { player.stop() }
     }
 
-    private func pill(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+    private func pill(_ title: String, icon: String, fill: Color = Palette.ink, foreground: Color = .white,
+                      action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: icon).font(.system(size: 12, weight: .semibold))
                 .padding(.horizontal, 12).padding(.vertical, 7)
-                .background(Capsule().fill(Palette.ink)).foregroundStyle(.white)
+                .background(Capsule().fill(fill)).foregroundStyle(foreground)
         }
         .buttonStyle(.plain)
     }
 }
 
 /// Draws the notes Markdown: headings, bullets, and text with inline bold and italics.
+/// A "[1:30] You: ..." line of a meeting transcript, with the stretch of audio it covers.
+struct TranscriptLine {
+    let index: Int
+    let speaker: String
+    let start: Double
+    /// Where the next stretch starts; nil for the last one, which runs to the end.
+    let end: Double?
+
+    static func parse(_ lines: [String]) -> [Int: TranscriptLine] {
+        let pattern = try! NSRegularExpression(pattern: #"^\[(\d+(?::\d{2}){1,2})\] (You|Others): "#)
+        var found: [(Int, String, Double)] = []
+        for (i, raw) in lines.enumerated() {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard let match = pattern.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+                  let time = Range(match.range(at: 1), in: line), let who = Range(match.range(at: 2), in: line)
+            else { continue }
+            let seconds = line[time].split(separator: ":").reduce(0.0) { $0 * 60 + (Double($1) ?? 0) }
+            found.append((i, String(line[who]), seconds))
+        }
+        let starts = Set(found.map(\.2)).sorted()
+        var result: [Int: TranscriptLine] = [:]
+        for (i, speaker, start) in found {
+            result[i] = TranscriptLine(index: i, speaker: speaker, start: start, end: starts.first { $0 > start })
+        }
+        return result
+    }
+}
+
 private struct MarkdownBody: View {
     let text: String
+    /// The transcript line playing now, by number.
+    var playing: String?
+    /// Plays a transcript line; nil when the note has no recording.
+    var onPlay: ((TranscriptLine) -> Void)?
 
     var body: some View {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let transcript = onPlay == nil ? [:] : TranscriptLine.parse(lines)
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, raw in
-                line(String(raw))
+            ForEach(Array(lines.enumerated()), id: \.offset) { i, raw in
+                if let entry = transcript[i], let onPlay {
+                    transcriptLine(raw, entry: entry, onPlay: onPlay)
+                } else {
+                    line(raw)
+                }
             }
         }
         .textSelection(.enabled)
@@ -932,6 +1124,24 @@ private struct MarkdownBody: View {
         } else {
             Text(inline(trimmed)).font(.system(size: 13)).foregroundStyle(Palette.ink.opacity(0.75))
         }
+    }
+
+    private func transcriptLine(_ raw: String, entry: TranscriptLine, onPlay: @escaping (TranscriptLine) -> Void) -> some View {
+        let isPlaying = playing == "\(entry.index)"
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Button { onPlay(entry) } label: {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(isPlaying ? Palette.coral : Palette.peach))
+                    .foregroundStyle(Palette.ink)
+            }
+            .buttonStyle(.plain)
+            .help("Play this part")
+            Text(inline(raw.trimmingCharacters(in: .whitespaces))).font(.system(size: 13)).foregroundStyle(Palette.ink.opacity(0.75))
+        }
+        .padding(.vertical, 2).padding(.horizontal, 4)
+        .background(RoundedRectangle(cornerRadius: 8).fill(isPlaying ? Palette.peach.opacity(0.5) : .clear))
     }
 
     private func inline(_ s: String) -> AttributedString {

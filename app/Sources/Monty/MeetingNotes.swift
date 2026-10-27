@@ -1,10 +1,11 @@
-import Foundation
+import AVFoundation
 
 /// Records a meeting and turns it into notes.
 ///
 /// Two streams are kept apart: the microphone (You) and the meeting app's own sound
 /// (Others). Every 30 seconds each stream's new audio is transcribed, so when the meeting
-/// ends only the notes are left to write.
+/// ends only the notes are left to write. When asked, both streams are also mixed into one
+/// audio file, kept next to the notes.
 final class MeetingRecorder {
     struct Segment {
         /// Seconds from the start of the meeting.
@@ -25,16 +26,25 @@ final class MeetingRecorder {
     private let tap = SystemAudioTap()
     private let othersLock = NSLock()
     private var othersSamples: [Int16] = []
+    /// Samples of the Others stream since the start, silence filled in included.
+    private var othersTotal = 0
     private var chunkStart = 0.0
     private var timer: Timer?
     private var segments: [Segment] = []
     private var work: Task<Void, Never>?
     private static let chunkSeconds = 30.0
+    /// The meeting's sound while it is recorded, both sides mixed; nil when it could not be
+    /// written. `NotesStore` gives it the note's name once the notes are saved.
+    private(set) var audioURL: URL?
+    private var audioFile: AVAudioFile?
 
-    init(meeting: MeetingDetector.Meeting, language: OutputLanguage, ollama: Ollama) {
+    private let saveAudio: Bool
+
+    init(meeting: MeetingDetector.Meeting, language: OutputLanguage, ollama: Ollama, saveAudio: Bool) {
         self.meeting = meeting
         self.language = language
         self.ollama = ollama
+        self.saveAudio = saveAudio
     }
 
     func start(micUID: String?) throws {
@@ -43,7 +53,12 @@ final class MeetingRecorder {
         try mic.start()
         tap.onSamples = { [weak self] chunk in
             guard let self else { return }
-            self.othersLock.withLock { self.othersSamples += chunk }
+            let arrivedAt = self.elapsed
+            self.othersLock.withLock {
+                self.fillOthersSilence(upTo: arrivedAt - Double(chunk.count) / AudioRecorder.sampleRate)
+                self.othersSamples += chunk
+                self.othersTotal += chunk.count
+            }
         }
         do {
             // Every app's sound except Monty's: a meeting app can start new audio processes
@@ -54,6 +69,7 @@ final class MeetingRecorder {
             // Without "System Audio Recording" the notes still cover what the microphone hears.
             Log.write("meeting: no system audio, microphone only (\(error.localizedDescription))")
         }
+        if saveAudio { openAudioFile() }
         timer = Timer.scheduledTimer(withTimeInterval: Self.chunkSeconds, repeats: true) { [weak self] _ in self?.cut() }
         Log.write("meeting notes started: \(meeting.name), \(language.label)")
     }
@@ -66,6 +82,7 @@ final class MeetingRecorder {
         cut()
         _ = mic.stop()
         tap.stop()
+        audioFile = nil  // closes the file
         await work?.value
         return Self.removingEcho(segments).sorted { $0.offset < $1.offset }
     }
@@ -75,16 +92,72 @@ final class MeetingRecorder {
         chunkStart = elapsed
         let mine = mic.drain()
         let theirs = othersLock.withLock { () -> [Int16] in
+            fillOthersSilence(upTo: chunkStart)
             let chunk = othersSamples
             othersSamples.removeAll(keepingCapacity: true)
             return chunk
         }
+        appendAudio(mine, theirs)
         // Stretches are transcribed one after another, in order.
         let previous = work
         work = Task { [weak self] in
             await previous?.value
             await self?.transcribe(theirs, speaker: "Others", offset: offset)
             await self?.transcribe(mine, speaker: "You", offset: offset)
+        }
+    }
+
+    /// macOS sends the meeting app's sound only while some sound plays, so its silences
+    /// would vanish and everything after them would move earlier than the microphone.
+    /// Silence is filled in up to `time` (seconds from the start), keeping the two in step.
+    /// Call with `othersLock` held.
+    private func fillOthersSilence(upTo time: Double) {
+        let expected = Int(time * AudioRecorder.sampleRate)
+        let missing = expected - othersTotal
+        guard missing > Int(AudioRecorder.sampleRate / 10) else { return }  // under 0.1 s is jitter
+        othersSamples += [Int16](repeating: 0, count: missing)
+        othersTotal = expected
+    }
+
+    /// AAC at 16 kHz, the rate both streams arrive in, in stereo: the microphone (You) on
+    /// the left, the meeting app (Others) on the right, so a line of the transcript can be
+    /// played for its own speaker. About 30 MB for an hour.
+    private func openAudioFile() {
+        let url = NotesStore.folder.appendingPathComponent(".recording \(Int(startedAt.timeIntervalSince1970)).m4a")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: AudioRecorder.sampleRate,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: 64_000,
+        ]
+        do {
+            try FileManager.default.createDirectory(at: NotesStore.folder, withIntermediateDirectories: true)
+            audioFile = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatInt16, interleaved: true)
+            audioURL = url
+        } catch {
+            Log.write("meeting: audio is not saved (\(error.localizedDescription))")
+        }
+    }
+
+    /// Adds one stretch of both streams, one per channel. The shorter one is padded with
+    /// silence, so the two stay in step.
+    private func appendAudio(_ mine: [Int16], _ theirs: [Int16]) {
+        guard let audioFile else { return }
+        let count = max(mine.count, theirs.count)
+        guard count > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: AVAudioFrameCount(count)),
+              let channel = buffer.int16ChannelData?[0]
+        else { return }
+        for i in 0..<count {  // interleaved: left, right, left, right, ...
+            channel[2 * i] = i < mine.count ? mine[i] : 0
+            channel[2 * i + 1] = i < theirs.count ? theirs[i] : 0
+        }
+        buffer.frameLength = AVAudioFrameCount(count)
+        do {
+            try audioFile.write(from: buffer)
+        } catch {
+            Log.write("meeting: audio stopped saving (\(error.localizedDescription))")
+            self.audioFile = nil
         }
     }
 
@@ -156,10 +229,44 @@ struct MeetingNote: Identifiable, Equatable {
     let language: String
     /// The notes and transcript, without the header block.
     let body: String
+    /// The meeting's recording, if it was kept.
+    var audio: URL? { NotesStore.audio(for: id) }
 }
 
 enum NotesStore {
     static var folder: URL { MontyFolder.notes }
+
+    /// Moves a note, and its recording, to the Trash, so a note deleted by mistake can still
+    /// be put back.
+    static func moveToTrash(_ note: MeetingNote) throws {
+        try FileManager.default.trashItem(at: note.id, resultingItemURL: nil)
+        if let audio = note.audio { try? FileManager.default.trashItem(at: audio, resultingItemURL: nil) }
+    }
+
+    /// The recording of a note: a file with the note's name and .m4a, when there is one.
+    static func audio(for note: URL) -> URL? {
+        let url = note.deletingPathExtension().appendingPathExtension("m4a")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Gives a meeting's recording the name of its note.
+    static func attachAudio(_ recording: URL?, to note: URL) {
+        guard let recording else { return }
+        do {
+            try FileManager.default.moveItem(at: recording, to: note.deletingPathExtension().appendingPathExtension("m4a"))
+        } catch {
+            Log.write("meeting: could not attach the recording (\(error.localizedDescription))")
+        }
+    }
+
+    /// Keeps a recording whose notes could not be written, under a plain name in the notes folder.
+    static func keepAudio(_ recording: URL?, meeting: MeetingDetector.Meeting, startedAt: Date) {
+        guard let recording else { return }
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd HH.mm"
+        let url = folder.appendingPathComponent("\(stamp.string(from: startedAt)) – \(meeting.name) – Recording.m4a")
+        try? FileManager.default.moveItem(at: recording, to: url)
+    }
 
     private static let iso = ISO8601DateFormatter()
 
