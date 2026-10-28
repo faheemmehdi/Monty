@@ -10,7 +10,9 @@ enum TextInserter {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    static func insert(_ text: String) {
+    /// With `keepOnClipboard`, the text stays on the clipboard after the paste, for when
+    /// it is not known whether a text field has focus.
+    static func insert(_ text: String, keepOnClipboard: Bool = false) {
         let pasteboard = NSPasteboard.general
         let saved = snapshot(pasteboard)
 
@@ -19,6 +21,7 @@ enum TextInserter {
         let ourChange = pasteboard.changeCount
 
         pressCommandV()
+        if keepOnClipboard { return }
 
         // Give the target app time to read the clipboard before putting the old one back.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {

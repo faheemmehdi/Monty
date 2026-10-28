@@ -293,10 +293,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     History.add(text: text, language: mode.shortLabel, seconds: seconds)
                     self.settings.model.reloadHistory()
                     Log.write(String(format: "response in %.1fs", seconds))
-                    if FocusDetector.focusedElementAcceptsText() {
+                    switch FocusDetector.focusedElementAcceptsText() {
+                    case .text:
                         TextInserter.insert(text)
                         self.finish(status: "Ready", phase: .done)
-                    } else {
+                    case .unknown:
+                        // Pasted in case a text field has focus, and kept on the clipboard in
+                        // case it did not land anywhere.
+                        TextInserter.insert(text, keepOnClipboard: true)
+                        self.finish(status: "Ready", phase: .done)
+                    case .notText:
                         TextInserter.copy(text)
                         NSSound(named: "Glass")?.play()
                         self.finish(status: "Copied. Press ⌘V to paste.", phase: .copied)
